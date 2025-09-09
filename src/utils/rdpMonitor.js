@@ -15,14 +15,17 @@ class RDPMonitor {
         return new Promise((resolve) => {
             const socket = new net.Socket();
             const timeout = 5000;
+            const startTime = Date.now();
 
             socket.setTimeout(timeout);
 
             socket.on('connect', () => {
+                const responseTime = Date.now() - startTime;
                 socket.destroy();
                 resolve({
                     success: true,
-                    message: 'RDP port is accessible'
+                    message: `✅ RDP port ${this.rdpPort} is accessible (${responseTime}ms)`,
+                    responseTime: responseTime
                 });
             });
 
@@ -30,7 +33,8 @@ class RDPMonitor {
                 socket.destroy();
                 resolve({
                     success: false,
-                    message: `RDP connection failed: ${err.message}`
+                    message: `❌ RDP connection failed: ${err.message}`,
+                    error: err.message
                 });
             });
 
@@ -38,7 +42,7 @@ class RDPMonitor {
                 socket.destroy();
                 resolve({
                     success: false,
-                    message: 'Connection timeout'
+                    message: `⏰ Connection timeout after ${timeout}ms`
                 });
             });
 
@@ -46,26 +50,40 @@ class RDPMonitor {
         });
     }
 
-    async waitForRDPReady(timeoutMs = 2700000) {
+    async waitForRDPReady(timeoutMs = 2700000, onStatusUpdate = null) {
         const startTime = Date.now();
         const maxRetries = Math.floor(timeoutMs / 30000);
         let retryCount = 0;
+
+        onStatusUpdate && onStatusUpdate(`🔍 Starting RDP monitoring for ${this.host}:${this.rdpPort}...`);
 
         while (retryCount < maxRetries) {
             try {
                 const testResult = await this.testRDPConnection();
                 const elapsedMinutes = Math.floor((Date.now() - startTime) / 60000);
+                const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
 
                 if (testResult.success) {
+                    onStatusUpdate && onStatusUpdate(`🎉 RDP is ready! Response time: ${testResult.responseTime}ms`);
                     return {
                         success: true,
                         rdpReady: true,
                         totalTime: elapsedMinutes,
-                        message: 'RDP is ready and accessible'
+                        responseTime: testResult.responseTime,
+                        message: `✅ RDP is ready and accessible (${testResult.responseTime}ms response time)`
                     };
                 }
 
                 retryCount++;
+                const remainingRetries = maxRetries - retryCount;
+                const nextCheckIn = 30; // seconds
+                
+                onStatusUpdate && onStatusUpdate(
+                    `⏳ Attempt ${retryCount}/${maxRetries} - ${testResult.message}\n` +
+                    `⏰ Elapsed: ${elapsedMinutes}m ${elapsedSeconds % 60}s\n` +
+                    `🔄 Next check in ${nextCheckIn}s (${remainingRetries} attempts remaining)`
+                );
+
                 if (retryCount < maxRetries) {
                     await new Promise(resolve => setTimeout(resolve, 30000));
                 }
@@ -73,6 +91,14 @@ class RDPMonitor {
             } catch (error) {
                 console.error('Error testing RDP:', error);
                 retryCount++;
+                const elapsedMinutes = Math.floor((Date.now() - startTime) / 60000);
+                
+                onStatusUpdate && onStatusUpdate(
+                    `⚠️ Error testing RDP: ${error.message}\n` +
+                    `⏰ Elapsed: ${elapsedMinutes} minutes\n` +
+                    `🔄 Retrying in 30 seconds...`
+                );
+                
                 if (retryCount < maxRetries) {
                     await new Promise(resolve => setTimeout(resolve, 30000));
                 }
@@ -80,6 +106,8 @@ class RDPMonitor {
         }
 
         const elapsedMinutes = Math.floor((Date.now() - startTime) / 60000);
+        onStatusUpdate && onStatusUpdate(`⏰ Monitoring timeout after ${elapsedMinutes} minutes`);
+        
         return {
             success: true,
             rdpReady: false,
