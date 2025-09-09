@@ -15,6 +15,8 @@ const PaymentTracker = require('./utils/paymentTracker');
 const DatabaseBackup = require('./utils/dbBackup');
 const { getUptime } = require('./utils/uptime');
 const safeMessageEditor = require('./utils/safeMessageEdit');
+const SessionManager = require('./utils/sessionManager');
+const ErrorHandler = require('./utils/errorHandler');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -25,14 +27,16 @@ if (!token) {
 
 const bot = new TelegramBot(token, { polling: true });
 
-const userSessions = new Map();
-const adminSessions = new Map();
-const depositSessions = new Map();
+const sessionManager = new SessionManager();
+const errorHandler = new ErrorHandler(bot, sessionManager);
 
 const dbBackup = new DatabaseBackup(bot);
 
 console.log('🤖 RDP Installation Bot started successfully!');
 console.log(`📅 Started at: ${new Date().toLocaleString('id-ID')}`);
+
+// Setup global error handlers
+ErrorHandler.setupGlobalErrorHandlers();
 
 scheduleJob('0 */6 * * *', () => {
     PaymentTracker.cleanupExpiredPayments();
@@ -117,9 +121,7 @@ bot.on('callback_query', async (query) => {
 
     try {
         if (data === 'back_to_menu') {
-            userSessions.delete(chatId);
-            adminSessions.delete(chatId);
-            depositSessions.delete(chatId);
+            sessionManager.clearAllSessions(chatId);
 
             const balance = await getBalance(chatId);
             const pendingPayment = await PaymentTracker.getPendingPayment(chatId);
@@ -141,22 +143,22 @@ bot.on('callback_query', async (query) => {
             });
         }
         else if (data === 'install_rdp') {
-            await handleInstallRDP(bot, chatId, messageId, userSessions);
+            await handleInstallRDP(bot, chatId, messageId, sessionManager);
         }
         else if (data === 'install_docker_rdp') {
-            await handleInstallDockerRDP(bot, chatId, messageId, userSessions);
+            await handleInstallDockerRDP(bot, chatId, messageId, sessionManager);
         }
         else if (data === 'install_dedicated_rdp') {
-            await handleInstallDedicatedRDP(bot, chatId, messageId, userSessions);
+            await handleInstallDedicatedRDP(bot, chatId, messageId, sessionManager);
         }
         else if (data === 'show_windows_selection') {
             await showWindowsSelection(bot, chatId, messageId, 0);
         }
         else if (data.startsWith('windows_')) {
-            await handleWindowsSelection(bot, query, userSessions);
+            await handleWindowsSelection(bot, query, sessionManager);
         }
         else if (data.startsWith('page_')) {
-            await handlePageNavigation(bot, query, userSessions);
+            await handlePageNavigation(bot, query, sessionManager);
         }
         else if (data === 'back_to_windows') {
             await showWindowsSelection(bot, chatId, messageId, 0);
@@ -165,7 +167,7 @@ bot.on('callback_query', async (query) => {
             await showDedicatedOSSelection(bot, chatId, messageId);
         }
         else if (data.startsWith('dedicated_os_')) {
-            await handleDedicatedOSSelection(bot, query, userSessions);
+            await handleDedicatedOSSelection(bot, query, sessionManager);
         }
         else if (data === 'back_to_dedicated_os') {
             await showDedicatedOSSelection(bot, chatId, messageId);
@@ -174,11 +176,34 @@ bot.on('callback_query', async (query) => {
             await showWindowsSelection(bot, chatId, messageId, 0);
         }
         else if (data === 'cancel_installation') {
-            await handleCancelInstallation(bot, query, userSessions);
+            await handleCancelInstallation(bot, query, sessionManager);
+        }
+        else if (data === 'main_menu') {
+            // Handle legacy main_menu callback
+            sessionManager.clearAllSessions(chatId);
+
+            const balance = await getBalance(chatId);
+            const pendingPayment = await PaymentTracker.getPendingPayment(chatId);
+            const isUserAdmin = isAdmin(chatId);
+
+            const welcomeMessage = `🎉 *Selamat datang di RDP Installation Bot!*\n\n` +
+                `👋 Halo ${query.from.first_name || 'User'}!\n\n` +
+                `💰 *Saldo:* ${typeof balance === 'string' ? balance : `Rp ${balance.toLocaleString()}`}\n\n` +
+                `🚀 *Layanan Tersedia:*\n` +
+                `• 🐳 Docker RDP - Rp 1.000/install\n` +
+                `• 🖥️ Dedicated RDP - Rp 3.000/install\n` +
+                `• 💰 Deposit saldo otomatis\n` +
+                `• 📚 Tutorial lengkap\n` +
+                `• 🏢 Rekomendasi provider VPS\n\n` +
+                `⏰ Uptime: ${getUptime()}`;
+
+            await safeMessageEditor.editMessage(bot, chatId, messageId, welcomeMessage, {
+                ...createMainMenu(isUserAdmin, !!pendingPayment)
+            });
         }
         else if (data === 'deposit') {
             const session = await handleDeposit(bot, chatId, messageId);
-            depositSessions.set(chatId, session);
+            sessionManager.setDepositSession(chatId, session);
         }
         else if (data === 'check_pending_payment') {
             await handlePendingPayment(bot, chatId, messageId);
@@ -195,13 +220,13 @@ bot.on('callback_query', async (query) => {
         else if (data === 'add_balance') {
             if (isAdmin(chatId)) {
                 await handleAddBalance(bot, chatId, messageId);
-                adminSessions.set(chatId, { action: 'add_balance' });
+                sessionManager.setAdminSession(chatId, { action: 'add_balance' });
             }
         }
         else if (data === 'broadcast') {
             if (isAdmin(chatId)) {
                 await handleBroadcast(bot, chatId, messageId);
-                adminSessions.set(chatId, { action: 'broadcast' });
+                sessionManager.setAdminSession(chatId, { action: 'broadcast' });
             }
         }
         else if (data === 'manage_db') {
@@ -218,6 +243,82 @@ bot.on('callback_query', async (query) => {
                         inline_keyboard: [[
                             { text: '« Kembali', callback_data: 'back_to_menu' }
                         ]]
+                    }
+                });
+            }
+        }
+        // Handle copy functionality
+        else if (data.startsWith('copy_rdp_')) {
+            const parts = data.split('_');
+            const ip = parts[2];
+            const password = parts[3];
+            const hostname = parts[4] || 'unknown';
+
+            await bot.answerCallbackQuery(query.id, {
+                text: `RDP Details:\n\nHostname: ${hostname}\nServer: ${ip}:8765\nUsername: administrator\nPassword: ${password}\n\nDetail sudah ditampilkan!`,
+                show_alert: true
+            });
+        }
+        else if (data.startsWith('copy_server_')) {
+            const server = data.replace('copy_server_', '');
+
+            await bot.answerCallbackQuery(query.id, {
+                text: `Server: ${server}\n\nCopy alamat server ini`,
+                show_alert: true
+            });
+        }
+        else if (data.startsWith('copy_pass_')) {
+            const password = data.replace('copy_pass_', '');
+
+            await bot.answerCallbackQuery(query.id, {
+                text: `Password: ${password}\n\nCopy password ini`,
+                show_alert: true
+            });
+        }
+        else if (data.startsWith('copy_hostname_')) {
+            const hostname = data.replace('copy_hostname_', '');
+
+            await bot.answerCallbackQuery(query.id, {
+                text: `Hostname: ${hostname}\n\nCopy hostname ini`,
+                show_alert: true
+            });
+        }
+        else if (data === 'rdp_connection_guide') {
+            await bot.answerCallbackQuery(query.id, {
+                text: 'Panduan Koneksi RDP:\n\n1. Buka Remote Desktop Connection\n2. Masukkan IP:Port (contoh: 1.2.3.4:8765)\n3. Username: administrator\n4. Password: [your password]\n5. Connect dan enjoy!',
+                show_alert: true
+            });
+        }
+        else if (data.startsWith('test_rdp_')) {
+            const parts = data.split('_');
+            const ip = parts[2];
+            const port = parts[3];
+
+            try {
+                const RDPMonitor = require('./utils/rdpMonitor');
+                const monitor = new RDPMonitor(ip, '', '', '', parseInt(port));
+                const testResult = await monitor.testRDPConnection();
+
+                await bot.answerCallbackQuery(query.id, {
+                    text: `Test RDP ${ip}:${port}\n\n${testResult.success ? 'RDP Siap!' : 'RDP Belum Siap'}\n\n${testResult.message}`,
+                    show_alert: true
+                });
+            } catch (error) {
+                await bot.answerCallbackQuery(query.id, {
+                    text: `Error testing RDP: ${error.message}`,
+                    show_alert: true
+                });
+            }
+        }
+        else if (data === 'cancel_payment') {
+            const session = sessionManager.getDepositSession(chatId);
+            if (session) {
+                sessionManager.clearDepositSession(chatId);
+                await safeMessageEditor.editMessage(bot, chatId, messageId, '❌ Pembayaran dibatalkan.', {
+                    reply_markup: {
+                        inline_keyboard: [
+                            [{ text: '🏠 Kembali ke Menu', callback_data: 'back_to_menu' }]
+                        ]
                     }
                 });
             }
@@ -283,15 +384,7 @@ bot.on('callback_query', async (query) => {
 
         await bot.answerCallbackQuery(query.id);
     } catch (error) {
-        console.error('Callback query error:', error);
-        try {
-            await bot.answerCallbackQuery(query.id, {
-                text: '❌ Terjadi kesalahan. Silakan coba lagi.',
-                show_alert: true
-            });
-        } catch (answerError) {
-            console.error('Error answering callback query:', answerError);
-        }
+        await errorHandler.handleCallbackError(error, query, { data });
     }
 });
 
@@ -307,39 +400,38 @@ bot.on('message', async (msg) => {
     }
 
     try {
-        const adminSession = adminSessions.get(chatId);
+        const adminSession = sessionManager.getAdminSession(chatId);
         if (adminSession && isAdmin(chatId)) {
             if (adminSession.action === 'add_balance') {
                 await processAddBalance(bot, msg);
-                adminSessions.delete(chatId);
+                sessionManager.clearAdminSession(chatId);
                 return;
             } else if (adminSession.action === 'broadcast') {
                 await processBroadcast(bot, msg);
-                adminSessions.delete(chatId);
+                sessionManager.clearAdminSession(chatId);
                 return;
             }
         }
 
-        const depositSession = depositSessions.get(chatId);
+        const depositSession = sessionManager.getDepositSession(chatId);
         if (depositSession && depositSession.step === 'waiting_amount') {
             await handleDepositAmount(bot, msg, depositSession);
-            depositSessions.delete(chatId);
+            sessionManager.clearDepositSession(chatId);
             return;
         }
 
-        const rdpSession = userSessions.get(chatId);
+        const rdpSession = sessionManager.getUserSession(chatId);
         if (rdpSession) {
             if (rdpSession.installType === 'dedicated') {
-                await handleDedicatedVPSCredentials(bot, msg, userSessions);
+                await handleDedicatedVPSCredentials(bot, msg, sessionManager);
             } else {
-                await handleVPSCredentials(bot, msg, userSessions);
+                await handleVPSCredentials(bot, msg, sessionManager);
             }
             return;
         }
 
     } catch (error) {
-        console.error('Message handler error:', error);
-        await bot.sendMessage(chatId, '❌ Terjadi kesalahan. Gunakan /start untuk memulai kembali.');
+        await errorHandler.handleMessageError(error, msg, { chatId });
     }
 });
 
@@ -367,4 +459,4 @@ process.on('SIGTERM', async () => {
     process.exit(0);
 });
 
-module.exports = { bot, userSessions, adminSessions, depositSessions };
+module.exports = { bot, sessionManager };

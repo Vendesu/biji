@@ -1,10 +1,12 @@
 const { WINDOWS_VERSIONS, INSTALLATION_COST } = require('../config/constants');
+const { BUTTONS, BUTTON_COMBINATIONS } = require('../config/buttons');
 const { checkVPSSupport } = require('../utils/vpsChecker');
 const { detectVPSSpecs } = require('../utils/vpsSpecs');
 const { installRDP } = require('../utils/rdpInstaller');
 const { installDedicatedRDP } = require('../utils/dedicatedRdpInstaller');
 const { deductBalance, isAdmin } = require('../utils/userManager');
 const { formatVPSSpecs } = require('../utils/messageFormatter');
+const ValidationUtils = require('../utils/validation');
 
 async function handleInstallRDP(bot, chatId, messageId, userSessions) {
     await bot.editMessageText(
@@ -25,17 +27,17 @@ async function handleInstallRDP(bot, chatId, messageId, userSessions) {
             parse_mode: 'Markdown',
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: '🐳 Docker RDP (Rp 1.000)', callback_data: 'install_docker_rdp' }],
-                    [{ text: '🖥️ Dedicated RDP (Rp 3.000)', callback_data: 'install_dedicated_rdp' }],
-                    [{ text: '« Kembali', callback_data: 'back_to_menu' }]
+                    [BUTTONS.DOCKER_RDP],
+                    [BUTTONS.DEDICATED_RDP],
+                    [BUTTONS.BACK_TO_MENU]
                 ]
             }
         }
     );
 }
 
-async function handleInstallDockerRDP(bot, chatId, messageId,userSessions) {
-    const session = userSessions.get(chatId) || {};
+async function handleInstallDockerRDP(bot, chatId, messageId, sessionManager) {
+    const session = sessionManager.getUserSession(chatId) || {};
     
     if (!isAdmin(chatId) && !await deductBalance(chatId, INSTALLATION_COST)) {
         await bot.editMessageText(
@@ -44,10 +46,7 @@ async function handleInstallDockerRDP(bot, chatId, messageId,userSessions) {
                 chat_id: chatId,
                 message_id: messageId,
                 reply_markup: {
-                    inline_keyboard: [[
-                        { text: '💰 Deposit', callback_data: 'deposit' },
-                        { text: '🏠 Kembali ke Menu Utama', callback_data: 'back_to_menu' }
-                    ]]
+                    inline_keyboard: [BUTTON_COMBINATIONS.DEPOSIT_AND_BACK]
                 }
             }
         );
@@ -74,7 +73,7 @@ async function handleInstallDockerRDP(bot, chatId, messageId,userSessions) {
             parse_mode: 'Markdown',
             reply_markup: {
                 inline_keyboard: [[
-                    { text: '❌ Batal', callback_data: 'cancel_installation' }
+                    BUTTONS.CANCEL
                 ]]
             }
         }
@@ -83,11 +82,11 @@ async function handleInstallDockerRDP(bot, chatId, messageId,userSessions) {
     session.step = 'waiting_ip';
     session.startTime = Date.now();
     session.messageId = msg.message_id;
-    userSessions.set(chatId, session);
+    sessionManager.setUserSession(chatId, session);
 }
 
 async function handleInstallDedicatedRDP(bot, chatId, messageId, userSessions) {
-    const session = userSessions.get(chatId) || {};
+    const session = sessionManager.getUserSession(chatId) || {};
     
     if (!isAdmin(chatId) && !await deductBalance(chatId, 3000)) {
         await bot.editMessageText(
@@ -126,7 +125,7 @@ async function handleInstallDedicatedRDP(bot, chatId, messageId, userSessions) {
             parse_mode: 'Markdown',
             reply_markup: {
                 inline_keyboard: [[
-                    { text: '❌ Batal', callback_data: 'cancel_installation' }
+                    BUTTONS.CANCEL
                 ]]
             }
         }
@@ -135,12 +134,12 @@ async function handleInstallDedicatedRDP(bot, chatId, messageId, userSessions) {
     session.step = 'waiting_ip';
     session.startTime = Date.now();
     session.messageId = msg.message_id;
-    userSessions.set(chatId, session);
+    sessionManager.setUserSession(chatId, session);
 }
 
-async function handleVPSCredentials(bot, msg, userSessions) {
+async function handleVPSCredentials(bot, msg, sessionManager) {
     const chatId = msg.chat.id;
-    const session = userSessions.get(chatId);
+    const session = sessionManager.getUserSession(chatId);
     
     if (!session) {
         await bot.sendMessage(chatId, '❌ Sesi telah kadaluarsa. Silakan mulai dari awal.');
@@ -155,21 +154,25 @@ async function handleVPSCredentials(bot, msg, userSessions) {
 
     switch (session.step) {
         case 'waiting_ip':
-            const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
-            if (!ipRegex.test(msg.text)) {
+            const ipValidation = ValidationUtils.validateIP(msg.text);
+            if (!ipValidation.valid) {
                 const errorMessage = session.installType === 'docker' 
                     ? '🐳 **Docker RDP Installation**\n\n🌐 **Masukkan IP VPS:**\n_IP akan dihapus otomatis setelah dikirim_\n\n⚠️ **PENTING:** VPS Wajib Fresh Install Ubuntu 22.04'
                     : '🖥️ **Dedicated RDP Installation**\n\n🌐 **Masukkan IP VPS:**\n_IP akan dihapus otomatis setelah dikirim_\n\n⚠️ **PENTING:** VPS Wajib Fresh Install Ubuntu 24.04 LTS';
                 
                 await bot.editMessageText(
-                    '❌ Format IP tidak valid.\n\n' + errorMessage,
+                    ValidationUtils.createErrorMessage(ipValidation.message, [
+                        'Gunakan format: 192.168.1.1',
+                        'Pastikan setiap bagian antara 0-255',
+                        'Contoh: 1.2.3.4'
+                    ]) + '\n\n' + errorMessage,
                     {
                         chat_id: chatId,
                         message_id: session.messageId,
                         parse_mode: 'Markdown',
                         reply_markup: {
                             inline_keyboard: [[
-                                { text: '❌ Batal', callback_data: 'cancel_installation' }
+                                BUTTONS.CANCEL
                             ]]
                         }
                     }
@@ -179,7 +182,7 @@ async function handleVPSCredentials(bot, msg, userSessions) {
 
             session.ip = msg.text;
             session.step = 'waiting_password';
-            userSessions.set(chatId, session);
+            sessionManager.setUserSession(chatId, session);
             
             await bot.editMessageText(
                 '🔑 **Password Root VPS:**\n' +
@@ -190,7 +193,7 @@ async function handleVPSCredentials(bot, msg, userSessions) {
                     parse_mode: 'Markdown',
                     reply_markup: {
                         inline_keyboard: [[
-                            { text: '❌ Batal', callback_data: 'cancel_installation' }
+                            BUTTONS.CANCEL
                         ]]
                     }
                 }
@@ -200,7 +203,7 @@ async function handleVPSCredentials(bot, msg, userSessions) {
         case 'waiting_password':
             session.password = msg.text;
             session.step = 'checking_vps';
-            userSessions.set(chatId, session);
+            sessionManager.setUserSession(chatId, session);
             
             await bot.editMessageText(
                 '🔍 Memeriksa VPS...',
@@ -250,7 +253,7 @@ async function handleVPSCredentials(bot, msg, userSessions) {
                                     inline_keyboard: [
                                         [
                                             { text: '✅ Lanjutkan', callback_data: 'continue_no_kvm' },
-                                            { text: '❌ Batal', callback_data: 'cancel_installation' }
+                                            BUTTONS.CANCEL
                                         ]
                                     ]
                                 }
@@ -303,12 +306,13 @@ async function handleVPSCredentials(bot, msg, userSessions) {
                         }
                     }
                 );
-                userSessions.delete(chatId);
+                sessionManager.clearUserSession(chatId);
             }
             break;
 
         case 'waiting_rdp_password':
-            if (msg.text.length < 8 || !/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d@#$%^&+=]{8,}$/.test(msg.text)) {
+            const passwordValidation = ValidationUtils.validateRDPPassword(msg.text);
+            if (!passwordValidation.valid) {
                 const ramInfo = session.installType === 'docker' 
                     ? `${session.vpsConfig.ram}GB (dikurangi 2GB untuk host OS)`
                     : `${session.vpsConfig.ram}GB (full spec - no reduction)`;
@@ -318,7 +322,11 @@ async function handleVPSCredentials(bot, msg, userSessions) {
                     : `${session.vpsConfig.storage}GB (full spec - no reduction)`;
 
                 await bot.editMessageText(
-                    '❌ Password tidak memenuhi syarat. Harus minimal 8 karakter dan mengandung huruf dan angka.\n\n' +
+                    ValidationUtils.createErrorMessage(passwordValidation.message, [
+                        'Minimal 8 karakter',
+                        'Harus mengandung huruf dan angka',
+                        'Contoh: Password123'
+                    ]) + '\n\n' +
                     `📋 **Konfigurasi yang dipilih:**\n\n` +
                     `🖥️ ${session.installType === 'docker' ? 'Docker RDP' : 'Dedicated RDP'}\n` +
                     `🪟 OS: ${session.windowsVersion?.name || session.selectedOS?.name}\n` +
@@ -335,7 +343,7 @@ async function handleVPSCredentials(bot, msg, userSessions) {
                         parse_mode: 'Markdown',
                         reply_markup: {
                             inline_keyboard: [[
-                                { text: '« Kembali', callback_data: 'back_to_windows' }
+                                BUTTONS.BACK_TO_WINDOWS
                             ]]
                         }
                     }
@@ -551,7 +559,7 @@ async function handleVPSCredentials(bot, msg, userSessions) {
                 }
             }
 
-            userSessions.delete(chatId);
+            sessionManager.clearUserSession(chatId);
             break;
     }
 }
@@ -617,7 +625,7 @@ async function showWindowsSelection(bot, chatId, messageId, page = 0) {
 }
 
 async function showDedicatedOSSelection(bot, chatId, messageId, userSessions) {
-    const session = userSessions.get(chatId);
+    const session = sessionManager.getUserSession(chatId);
     
     if (!session) {
         await bot.answerCallbackQuery(query.id, {
@@ -667,10 +675,10 @@ async function showDedicatedOSSelection(bot, chatId, messageId, userSessions) {
     });
 }
 
-async function handleWindowsSelection(bot, query, userSessions) {
+async function handleWindowsSelection(bot, query, sessionManager) {
     const chatId = query.message.chat.id;
     const messageId = query.message.message_id;
-    const session = userSessions.get(chatId);
+    const session = sessionManager.getUserSession(chatId);
     
     if (!session) {
         await bot.answerCallbackQuery(query.id, {
@@ -693,7 +701,7 @@ async function handleWindowsSelection(bot, query, userSessions) {
 
     session.windowsVersion = selectedWindows;
     session.step = 'waiting_rdp_password';
-    userSessions.set(chatId, session);
+    sessionManager.setUserSession(chatId, session);
     
     const ramInfo = session.installType === 'docker' 
         ? `${session.vpsConfig.ram}GB (dikurangi 2GB untuk host OS)`
@@ -727,10 +735,10 @@ async function handleWindowsSelection(bot, query, userSessions) {
     );
 }
 
-async function handleDedicatedOSSelection(bot, query, userSessions) {
+async function handleDedicatedOSSelection(bot, query, sessionManager) {
     const chatId = query.message.chat.id;
     const messageId = query.message.message_id;
-    const session = userSessions.get(chatId);
+    const session = sessionManager.getUserSession(chatId);
     
     if (!session) {
         await bot.answerCallbackQuery(query.id, {
@@ -761,7 +769,7 @@ async function handleDedicatedOSSelection(bot, query, userSessions) {
 
     session.selectedOS = selectedOS;
     session.step = 'waiting_rdp_password';
-    userSessions.set(chatId, session);
+    sessionManager.setUserSession(chatId, session);
     
     await bot.editMessageText(
         `📋 **Konfigurasi yang dipilih:**\n\n` +
@@ -787,17 +795,17 @@ async function handleDedicatedOSSelection(bot, query, userSessions) {
     );
 }
 
-async function handlePageNavigation(bot, query, userSessions) {
+async function handlePageNavigation(bot, query, sessionManager) {
     const chatId = query.message.chat.id;
     const messageId = query.message.message_id;
     const page = parseInt(query.data.split('_')[1]);
     await showWindowsSelection(bot, chatId, messageId, page);
 }
 
-async function handleCancelInstallation(bot, query, userSessions) {
+async function handleCancelInstallation(bot, query, sessionManager) {
     const chatId = query.message.chat.id;
     const messageId = query.message.message_id;
-    userSessions.delete(chatId);
+    sessionManager.clearUserSession(chatId);
     
     await bot.editMessageText(
         '❌ Instalasi dibatalkan.',
