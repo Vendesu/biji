@@ -8,7 +8,7 @@ const { deductBalance, isAdmin } = require('../utils/userManager');
 const RDPMonitor = require('../utils/rdpMonitor');
 const safeMessageEditor = require('../utils/safeMessageEdit');
 
-async function handleInstallDedicatedRDP(bot, chatId, messageId, userSessions) {
+async function handleInstallDedicatedRDP(bot, chatId, messageId, sessionManager) {
   if (!isAdmin(chatId) && !await deductBalance(chatId, DEDICATED_INSTALLATION_COST)) {
     await safeMessageEditor.editMessage(bot, chatId, messageId,
       'Saldo tidak mencukupi untuk Dedicated RDP (Rp 3.000). Silakan deposit terlebih dahulu.',
@@ -23,7 +23,7 @@ async function handleInstallDedicatedRDP(bot, chatId, messageId, userSessions) {
     return;
   }
 
-  const session = userSessions.get(chatId) || {};
+  const session = sessionManager.getUserSession(chatId) || {};
   session.installType = 'dedicated';
 
   const msg = await bot.editMessageText(
@@ -53,12 +53,12 @@ async function handleInstallDedicatedRDP(bot, chatId, messageId, userSessions) {
   session.step = 'waiting_ip';
   session.startTime = Date.now();
   session.messageId = msg.message_id;
-  userSessions.set(chatId, session);
+  sessionManager.setUserSession(chatId, session);
 }
 
-async function handleDedicatedVPSCredentials(bot, msg, userSessions) {
+async function handleDedicatedVPSCredentials(bot, msg, sessionManager) {
   const chatId = msg.chat.id;
-  const session = userSessions.get(chatId);
+  const session = sessionManager.getUserSession(chatId);
 
   if (!session || session.installType !== 'dedicated') {
     await bot.sendMessage(chatId, 'Sesi telah kadaluarsa. Silakan mulai dari awal.');
@@ -94,7 +94,7 @@ async function handleDedicatedVPSCredentials(bot, msg, userSessions) {
 
       session.ip = msg.text;
       session.step = 'waiting_password';
-      userSessions.set(chatId, session);
+      sessionManager.setUserSession(chatId, session);
 
       await safeMessageEditor.editMessage(bot, chatId, session.messageId,
         'Password Root VPS:\nPassword akan dihapus otomatis',
@@ -111,7 +111,7 @@ async function handleDedicatedVPSCredentials(bot, msg, userSessions) {
     case 'waiting_password':
       session.password = msg.text;
       session.step = 'checking_vps';
-      userSessions.set(chatId, session);
+      sessionManager.setUserSession(chatId, session);
 
       await safeMessageEditor.editMessage(bot, chatId, session.messageId, 'Memeriksa VPS...');
 
@@ -140,12 +140,12 @@ async function handleDedicatedVPSCredentials(bot, msg, userSessions) {
             reply_markup: {
               inline_keyboard: [
                 [{ text: 'Coba Lagi', callback_data: 'install_dedicated_rdp' }],
-                [{ text: 'Kembali', callback_data: 'main_menu' }]
+                [{ text: 'Kembali', callback_data: 'back_to_menu' }]
               ]
             }
           }
         );
-        userSessions.delete(chatId);
+        sessionManager.clearUserSession(chatId);
       }
       break;
 
@@ -302,7 +302,7 @@ async function handleDedicatedVPSCredentials(bot, msg, userSessions) {
             );
 
             safeMessageEditor.clearMessageCache(chatId, session.messageId);
-            userSessions.delete(chatId);
+            sessionManager.clearUserSession(chatId);
           }
         }, 120000);
 
@@ -328,7 +328,7 @@ async function handleDedicatedVPSCredentials(bot, msg, userSessions) {
         );
 
         safeMessageEditor.clearMessageCache(chatId, session.messageId);
-        userSessions.delete(chatId);
+        sessionManager.clearUserSession(chatId);
       }
       break;
   }
@@ -369,10 +369,10 @@ async function showDedicatedOSSelection(bot, chatId, messageId) {
   });
 }
 
-async function handleDedicatedOSSelection(bot, query, userSessions) {
+async function handleDedicatedOSSelection(bot, query, sessionManager) {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
-  const session = userSessions.get(chatId);
+  const session = sessionManager.getUserSession(chatId);
 
   if (!session) {
     await bot.answerCallbackQuery(query.id, {
@@ -395,7 +395,7 @@ async function handleDedicatedOSSelection(bot, query, userSessions) {
 
   session.selectedOS = selectedOS;
   session.step = 'waiting_rdp_password';
-  userSessions.set(chatId, session);
+  sessionManager.setUserSession(chatId, session);
 
   await safeMessageEditor.editMessage(bot, chatId, messageId,
     `Konfigurasi yang dipilih:\n\n` +
